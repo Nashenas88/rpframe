@@ -138,18 +138,74 @@ fn main() -> ! {
         .unwrap();
 
     let mut rosc = RingOscillator::new(pac.ROSC).initialize();
-    let mut rand_bytes = [0, 0, 0];
+    let mut rand_bytes = [0; 16];
     let neg_bytes = [32, -32];
+    let is_blue = [0, 1, 1, 0, 0, 1, 0, 1];
+    const BLUE_SCALE: u16 = 5;
 
-    const START: i32 = u16::MAX as i32 / 4;
-    // TODO custom twinkle for each star
-    loop {
-        let neg = rosc.get_random_bit();
-        rosc.fill_bytes(&mut rand_bytes);
-        for channel in &mut stars {
-            channel.set_duty((START + (rand_bytes[0] as i32) * neg_bytes[neg as usize]) as u16);
+    // Initialize starting values at random.
+    let starts = {
+        const START: i32 = u16::MAX as i32 / 4;
+        let mut offsets = [0; 8];
+        rosc.fill_bytes(&mut offsets);
+        let mut starts = [0; 8];
+        for (start, offset) in starts.iter_mut().zip(&offsets) {
+            *start = START + (*offset as i32) * neg_bytes[rosc.get_random_bit() as usize];
         }
-        delay.delay_ms(rand_bytes[1] as u32);
+        starts
+    };
+
+    // Setup initial offsets + delays.
+    rosc.fill_bytes(&mut rand_bytes);
+    for (channel, (start, (offset, is_blue))) in stars
+        .iter_mut()
+        .zip(starts.iter().zip(rand_bytes.iter().zip(is_blue.iter())))
+    {
+        let neg = rosc.get_random_bit() as usize;
+        channel.set_duty(
+            ((start + (*offset as i32) * neg_bytes[neg]) as u16) >> (is_blue * BLUE_SCALE),
+        );
+    }
+
+    // Find minimum delay
+    let mut min = rand_bytes[8..].iter().copied().min().unwrap();
+
+    loop {
+        let (offsets, delays) = rand_bytes.split_at_mut(8);
+
+        let mut new_min = u8::MAX;
+
+        // Update delays, updating multiple in case multiple with same delay.
+        for (delay, (star, (start, (offset, is_blue)))) in delays.iter_mut().zip(
+            stars
+                .iter_mut()
+                .zip(starts.iter().zip(offsets.iter_mut().zip(is_blue.iter()))),
+        ) {
+            if *delay != min {
+                *delay -= min;
+                if *delay < new_min {
+                    new_min = *delay;
+                }
+                continue;
+            }
+
+            // Update entry with new min
+            rosc.fill_bytes(core::array::from_mut(delay));
+
+            // Update the star with the new offset.
+            let neg = rosc.get_random_bit() as usize;
+            star.set_duty(
+                ((*start + (*offset as i32) * neg_bytes[neg]) as u16) >> (is_blue * BLUE_SCALE),
+            );
+
+            // Calculate the next offset.
+            rosc.fill_bytes(core::array::from_mut(offset));
+        }
+
+        min = new_min;
+
+        // Delay, allowing the twinkle to occur.
+        delay.delay_ms(min as u32);
     }
 }
 
